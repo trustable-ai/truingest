@@ -1,142 +1,97 @@
 """
-Process chunks into question-answer pairs using OpenAI API.
-Saves the Q&A pairs to S3.
+Process a single chunk by sending it to an AI model to generate Q&A pairs.
+Returns JSONL formatted lines as specified in the spec.
 """
 import os
 import json
-import boto3
 from openai import OpenAI
+
 
 def process(args):
     """
-    Transform a text chunk into a question-answer pair using LLM.
+    Process a single text chunk to generate Q&A pairs in JSONL format.
+
+    According to spec 5-processing.md:
+    - Transform content as sequence of question and answer
+    - Return sequence of JSONs (one in each line) like:
+      {"role": "user", "content": <question>}
+      {"role": "assistant", "content": <answer>}
 
     Args:
-        args: dict with 'input' (chunk text) and OpenAI/S3 credentials
+        args: dict with 'input' (chunk text) and OpenAI credentials
 
     Returns:
-        dict with 'user' (question), 'assistant' (answer), and 's3_key' if stored
+        dict with 'output' (JSONL string with Q&A pairs)
     """
-    input_text = args.get("input", "")
+    chunk_text = args.get("input", "")
 
-    if not input_text:
-        return {"user": "", "assistant": ""}
+    if not chunk_text:
+        return {"error": "input is required", "output": ""}
 
     # Get OpenAI configuration
-    api_key = args.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "dummy"))
+    api_key = args.get("OPENAI_API_TOKEN", os.getenv("OPENAI_API_TOKEN", "dummy"))
     base_url = args.get("OPENAI_BASE_URL", os.getenv("OPENAI_BASE_URL"))
     model = args.get("OPENAI_MODEL", os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"))
 
-    # Generate Q&A pair using LLM
     try:
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        # Use OpenAI client (works with both OpenAI and Ollama)
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
 
-        prompt = f"""Based on the following text chunk, generate a question and answer pair.
-The question should be something that this text chunk can answer.
-The answer should be based on the information in the text.
+        # Exact prompt from spec 5-processing.md
+        prompt = f"""Transform the content of the following text
+as a sequence of question and answer related to it.
+return a sequence of jsons (one in each like) like this:
 
-Text chunk:
-{input_text}
+{{"role": "user", "content": <question>}}
+{{"role": "assistant", "content": <answer>}}
 
-Respond in JSON format with "question" and "answer" fields."""
+Text:
+{chunk_text}"""
 
         response = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that generates question-answer pairs from text."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.7,
-            max_tokens=500
+            max_tokens=1000
         )
 
-        # Parse response
-        response_text = response.choices[0].message.content
+        # Get response text
+        response_text = response.choices[0].message.content.strip()
 
-        # Try to parse as JSON
-        try:
-            qa_data = json.loads(response_text)
-            question = qa_data.get("question", "")
-            answer = qa_data.get("answer", "")
-        except json.JSONDecodeError:
-            # Fallback: use simple extraction
-            question = f"What information is provided in this text?"
-            answer = input_text[:200] + "..." if len(input_text) > 200 else input_text
+        # The model should return JSONL format directly
+        # Validate that it's proper JSONL
+        lines = response_text.strip().split('\n')
+        validated_lines = []
+
+        for line in lines:
+            line = line.strip()
+            if line:
+                try:
+                    # Validate it's valid JSON
+                    parsed = json.loads(line)
+                    # Ensure it has role and content fields
+                    if "role" in parsed and "content" in parsed:
+                        validated_lines.append(line)
+                except json.JSONDecodeError:
+                    # Skip invalid lines
+                    continue
+
+        if validated_lines:
+            output = '\n'.join(validated_lines)
+            return {"output": output}
+        else:
+            # Fallback: create a simple Q&A if model didn't return proper format
+            fallback = [
+                json.dumps({"role": "user", "content": "What information is provided in this text?"}),
+                json.dumps({"role": "assistant", "content": chunk_text[:300] + "..." if len(chunk_text) > 300 else chunk_text})
+            ]
+            return {"output": '\n'.join(fallback)}
 
     except Exception as e:
-        # Fallback if LLM fails
-        print(f"Warning: LLM processing failed: {e}")
-        question = f"What is the content of this chunk?"
-        answer = input_text[:200] + "..." if len(input_text) > 200 else input_text
-
-    qa_pair = {
-        "user": question,
-        "assistant": answer
-    }
-
-    # Store in S3 if credentials provided
-    s3_key = None
-    if args.get("S3_HOST"):
-        s3_key = store_qa_in_s3(qa_pair, input_text, args)
-
-    return {
-        **qa_pair,
-        "s3_key": s3_key
-    }
-
-
-def store_qa_in_s3(qa_pair, original_text, args):
-    """
-    Store Q&A pair in S3 as JSON.
-
-    Args:
-        qa_pair: dict with 'user' and 'assistant' keys
-        original_text: original chunk text
-        args: dict with S3 credentials
-
-    Returns:
-        S3 key where Q&A is stored
-    """
-    try:
-        # Get S3 configuration
-        host = args.get("S3_HOST", os.getenv("S3_HOST"))
-        port = args.get("S3_PORT", os.getenv("S3_PORT"))
-        s3_url = f"http://{host}:{port}"
-        access_key = args.get("S3_ACCESS_KEY", os.getenv("S3_ACCESS_KEY"))
-        secret_key = args.get("S3_SECRET_KEY", os.getenv("S3_SECRET_KEY"))
-        bucket = args.get("S3_BUCKET_DATA", os.getenv("S3_BUCKET_DATA"))
-
-        # Initialize S3 client
-        s3_client = boto3.client(
-            's3',
-            region_name='us-east-1',
-            endpoint_url=s3_url,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key
-        )
-
-        # Generate S3 key
-        from datetime import datetime
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        s3_key = f"qa_pairs/qa_{timestamp}.json"
-
-        # Store Q&A pair with metadata
-        qa_data = {
-            "question": qa_pair["user"],
-            "answer": qa_pair["assistant"],
-            "original_chunk": original_text,
-            "timestamp": timestamp
-        }
-
-        s3_client.put_object(
-            Bucket=bucket,
-            Key=s3_key,
-            Body=json.dumps(qa_data, indent=2).encode('utf-8'),
-            ContentType='application/json'
-        )
-
-        return s3_key
-
-    except Exception as e:
-        print(f"Warning: Failed to store Q&A in S3: {e}")
-        return None
+        return {"error": f"Failed to process chunk: {str(e)}", "output": ""}
+   

@@ -4,55 +4,50 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, "packages/rag/process")
 from process import process as process_func
 
-def test_process_empty():
+
+def test_process_empty_input():
     """Test processing with empty input"""
     res = process_func({})
-    assert res["user"] == ""
-    assert res["assistant"] == ""
+    assert res.get("error") == "input is required"
+    assert res.get("output") == ""
 
-def test_process_no_llm_mock():
-    """Test processing with fallback when LLM fails"""
-    text = "This is a test document about Python programming."
 
-    with patch('process.OpenAI') as mock_openai:
-        # Simulate LLM failure
-        mock_openai.side_effect = Exception("API error")
-
-        res = process_func({
-            "input": text,
-            "OPENAI_API_KEY": "dummy"
-        })
-
-        assert "user" in res
-        assert "assistant" in res
-        assert res["user"] != ""
-        assert res["assistant"] != ""
-
-def test_process_with_llm_mock():
-    """Test processing with successful LLM response"""
+def test_process_with_mock_llm():
+    """Test processing a single chunk with successful LLM response"""
     text = "Python is a high-level programming language known for its simplicity."
 
     with patch('process.OpenAI') as mock_openai:
-        # Create mock response
+        # Create mock response with proper JSONL format
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = json.dumps({
-            "question": "What is Python?",
-            "answer": "Python is a high-level programming language known for its simplicity."
-        })
+        # Simulate JSONL response from the model
+        mock_response.choices[0].message.content = '''{"role": "user", "content": "What is Python?"}
+{"role": "assistant", "content": "Python is a high-level programming language known for its simplicity."}'''
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai.return_value = mock_client
 
         res = process_func({
             "input": text,
-            "OPENAI_API_KEY": "dummy",
+            "OPENAI_API_TOKEN": "dummy",
             "OPENAI_BASE_URL": "http://localhost:11434/v1",
-            "OPENAI_MODEL": "gpt-oss:20b"
+            "OPENAI_MODEL": "gpt-3.5-turbo"
         })
 
-        assert res["user"] == "What is Python?"
-        assert res["assistant"] == "Python is a high-level programming language known for its simplicity."
+        assert "output" in res
+        assert "error" not in res
+
+        # Parse the JSONL output
+        lines = res["output"].strip().split('\n')
+        assert len(lines) == 2
+
+        user_msg = json.loads(lines[0])
+        assistant_msg = json.loads(lines[1])
+
+        assert user_msg["role"] == "user"
+        assert assistant_msg["role"] == "assistant"
+        assert "What is Python?" in user_msg["content"]
+
 
 def test_process_invalid_json_response():
     """Test processing when LLM returns non-JSON response"""
@@ -69,52 +64,21 @@ def test_process_invalid_json_response():
 
         res = process_func({
             "input": text,
-            "OPENAI_API_KEY": "dummy"
+            "OPENAI_API_TOKEN": "dummy"
         })
 
         # Should fall back to default question/answer
-        assert res["user"] == "What information is provided in this text?"
-        assert "Machine learning" in res["assistant"]
+        assert "output" in res
+        lines = res["output"].strip().split('\n')
+        assert len(lines) == 2
 
-def test_process_s3_storage_mock():
-    """Test that S3 storage is attempted when credentials provided"""
-    text = "Test content for S3 storage."
+        user_msg = json.loads(lines[0])
+        assert user_msg["content"] == "What information is provided in this text?"
 
-    with patch('process.OpenAI') as mock_openai, \
-         patch('process.store_qa_in_s3') as mock_store:
 
-        # Mock LLM response
-        mock_client = MagicMock()
-        mock_response = MagicMock()
-        mock_response.choices = [MagicMock()]
-        mock_response.choices[0].message.content = json.dumps({
-            "question": "What is the test about?",
-            "answer": "S3 storage testing."
-        })
-        mock_client.chat.completions.create.return_value = mock_response
-        mock_openai.return_value = mock_client
-
-        # Mock S3 storage
-        mock_store.return_value = "qa_pairs/qa_12345.json"
-
-        res = process_func({
-            "input": text,
-            "OPENAI_API_KEY": "dummy",
-            "S3_HOST": "localhost",
-            "S3_PORT": "9000",
-            "S3_ACCESS_KEY": "test",
-            "S3_SECRET_KEY": "test",
-            "S3_BUCKET_DATA": "test-bucket"
-        })
-
-        # Verify S3 storage was called
-        assert mock_store.called
-        assert res["s3_key"] == "qa_pairs/qa_12345.json"
-
-def test_process_truncation():
-    """Test that long text is truncated in fallback mode"""
-    # Create text longer than 200 characters
-    text = "x" * 300
+def test_process_llm_failure():
+    """Test processing with LLM failure (uses fallback)"""
+    text = "Test document content."
 
     with patch('process.OpenAI') as mock_openai:
         # Simulate LLM failure
@@ -122,9 +86,104 @@ def test_process_truncation():
 
         res = process_func({
             "input": text,
-            "OPENAI_API_KEY": "dummy"
+            "OPENAI_API_TOKEN": "dummy"
         })
 
-        # Answer should be truncated to 200 chars + "..."
-        assert len(res["assistant"]) == 203
-        assert res["assistant"].endswith("...")
+        # Should return error
+        assert "error" in res
+        assert "Failed to process chunk" in res["error"]
+
+
+def test_output_format():
+    """Test that output format matches spec: {"role": "user/assistant", "content": ...}"""
+    text = "Test text for format validation."
+
+    with patch('process.OpenAI') as mock_openai:
+        # Create mock response
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '''{"role": "user", "content": "What is this test about?"}
+{"role": "assistant", "content": "This test validates the output format."}'''
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_openai.return_value = mock_client
+
+        res = process_func({
+            "input": text,
+            "OPENAI_API_TOKEN": "dummy"
+        })
+
+        # Verify format
+        assert "output" in res
+        lines = res["output"].strip().split('\n')
+        assert len(lines) == 2
+
+        # Parse both lines
+        user_msg = json.loads(lines[0])
+        assistant_msg = json.loads(lines[1])
+
+        assert user_msg == {"role": "user", "content": "What is this test about?"}
+        assert assistant_msg == {"role": "assistant", "content": "This test validates the output format."}
+
+
+def test_process_partial_valid_json():
+    """Test processing when LLM returns mix of valid and invalid JSON lines"""
+    text = "Test content"
+
+    with patch('process.OpenAI') as mock_openai:
+        # Create mock response with mixed valid/invalid lines
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '''{"role": "user", "content": "Valid question?"}
+This is not JSON
+{"role": "assistant", "content": "Valid answer."}
+Also not JSON'''
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_openai.return_value = mock_client
+
+        res = process_func({
+            "input": text,
+            "OPENAI_API_TOKEN": "dummy"
+        })
+
+        # Should only include valid lines
+        assert "output" in res
+        lines = res["output"].strip().split('\n')
+        assert len(lines) == 2
+
+        # Both should be valid JSON
+        user_msg = json.loads(lines[0])
+        assistant_msg = json.loads(lines[1])
+        assert user_msg["role"] == "user"
+        assert assistant_msg["role"] == "assistant"
+
+
+def test_process_prompt_format():
+    """Test that the exact prompt from spec is used"""
+    text = "Sample text"
+
+    with patch('process.OpenAI') as mock_openai:
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '''{"role": "user", "content": "Q?"}
+{"role": "assistant", "content": "A."}'''
+        mock_client.chat.completions.create.return_value = mock_response
+        mock_openai.return_value = mock_client
+
+        process_func({
+            "input": text,
+            "OPENAI_API_TOKEN": "dummy"
+        })
+
+        # Verify the prompt contains the spec-required text
+        call_args = mock_client.chat.completions.create.call_args
+        messages = call_args[1]["messages"]
+        prompt = messages[0]["content"]
+
+        assert "Transform the content of the following text" in prompt
+        assert "as a sequence of question and answer related to it" in prompt
+        assert '{"role": "user", "content": <question>}' in prompt
+        assert '{"role": "assistant", "content": <answer>}' in prompt
+        assert f"Text:\n{text}" in prompt

@@ -4,16 +4,18 @@ import unicodedata
 def clean(args):
     """
     Clean extracted text by removing:
-    - Lines containing only numbers
-    - Empty lines
+    - Lines with a single number (page numbers)
+    - Lines with "Figure <number>"
+    - Table of contents lines ending in "...<number>"
     - Strange/invalid characters (non-printable, corrupted unicode)
     - Common OCR artifacts
+    - Multiple consecutive empty lines (keep at least one line separating paragraphs)
 
     Args:
         args: dict with 'input' containing the text to clean
 
     Returns:
-        dict with 'output' containing cleaned text
+        dict with 'output' containing cleaned UTF-8 text
     """
     text = args.get("input", "")
 
@@ -24,12 +26,21 @@ def clean(args):
     cleaned_lines = []
 
     for line in lines:
-        # Skip empty lines
-        if not line.strip():
+        # Skip lines that are only numbers (page numbers)
+        if re.match(r'^\s*\d+\s*$', line):
             continue
 
-        # Skip lines that are only numbers (page numbers, etc.)
-        if re.match(r'^\s*\d+\s*$', line):
+        # Skip lines with "Figure <number>" (case insensitive)
+        if re.search(r'\bFigure\s+\d+\b', line, re.IGNORECASE):
+            continue
+
+        # Skip table of contents lines ending in "...<number>"
+        if re.search(r'\.{2,}\s*\d+\s*$', line):
+            continue
+
+        # If line is empty, keep it as is (for paragraph separation)
+        if not line.strip():
+            cleaned_lines.append("")
             continue
 
         # Remove strange characters and clean the line
@@ -39,7 +50,22 @@ def clean(args):
         if cleaned_line.strip():
             cleaned_lines.append(cleaned_line)
 
-    return {"output": '\n'.join(cleaned_lines)}
+    # Remove multiple consecutive empty lines, keeping only one
+    result_lines = []
+    prev_empty = False
+
+    for line in cleaned_lines:
+        is_empty = not line.strip()
+
+        if is_empty:
+            if not prev_empty:
+                result_lines.append(line)
+            prev_empty = True
+        else:
+            result_lines.append(line)
+            prev_empty = False
+
+    return {"output": '\n'.join(result_lines)}
 
 
 def clean_line(line):

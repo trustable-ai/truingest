@@ -1,12 +1,12 @@
-Implement chunk using this reference
-chunk_size = 500
-overlap = 100
-step = chunk_size - overlap
+In the step Chunking the document in chunks 
+using empty lines as chunk separator.
 
-for i in range(0, len(tokens), step):
-    chunk = tokens[i : i + chunk_size]
-    save(chunk)
+Save all the chunks on S3 as a single JSONL file
+where each line is in format
 
-save the result in S3
+{"assistant": <chunk> }
 
-Show the chunk block more visible and highlight the overlap in a color like blue or yellow whatever
+In the step Export provide a link as a signed url 
+to download the resulting JSONL
+
+

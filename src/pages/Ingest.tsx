@@ -8,9 +8,8 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 import { toast } from "sonner";
-import { useNavigate } from "react-router-dom";
 
-type ProcessingStep = "upload" | "extract" | "cleaning" | "chunking" | "processing" | "storing";
+type ProcessingStep = "upload" | "extract" | "cleaning" | "chunking" | "export";
 
 interface Document {
   id: string;
@@ -24,17 +23,16 @@ interface Document {
     extract?: string; // Extracted text from Tika
     cleaning?: string; // Cleaned text
     chunking?: string[]; // Array of chunks
-    processing?: Array<{ user: string; assistant: string }>; // Processed chunks
-    storing?: boolean; // Store result
+    chunkingS3Key?: string; // S3 key for chunks
+    export?: string; // Export download URL
   };
 }
 
 const Ingest = () => {
-  const navigate = useNavigate();
   const [documents, setDocuments] = useState<Document[]>([]);
   const [expandedStep, setExpandedStep] = useState<string>("");
 
-  const processingSteps: ProcessingStep[] = ["upload", "extract", "cleaning", "chunking", "processing", "storing"];
+  const processingSteps: ProcessingStep[] = ["upload", "extract", "cleaning", "chunking", "export"];
 
   const addDocument = () => {
     const newDoc: Document = {
@@ -246,6 +244,7 @@ const Ingest = () => {
 
       const data = await response.json();
       const chunks = data.output;
+      const s3Key = data.s3_key;
 
       setDocuments((prev) =>
         prev.map((d) =>
@@ -255,7 +254,7 @@ const Ingest = () => {
                 completedSteps: [...d.completedSteps, "chunking"],
                 currentStep: null,
                 status: "pending" as const,
-                stepData: { ...d.stepData, chunking: chunks },
+                stepData: { ...d.stepData, chunking: chunks, chunkingS3Key: s3Key },
               }
             : d
         )
@@ -269,73 +268,25 @@ const Ingest = () => {
     }
   };
 
-  const executeProcessing = async (docId: string) => {
+  const executeExport = async (docId: string) => {
     const doc = documents.find((d) => d.id === docId);
-    if (!doc || !doc.stepData.chunking || doc.stepData.chunking.length === 0) {
-      toast.error("No chunks available");
+    if (!doc || !doc.stepData.chunkingS3Key) {
+      toast.error("No chunks available for export");
       return;
     }
 
     setDocuments((prev) =>
-      prev.map((d) => (d.id === docId ? { ...d, currentStep: "processing" as const, status: "processing" as const } : d))
+      prev.map((d) => (d.id === docId ? { ...d, currentStep: "export" as const, status: "processing" as const } : d))
     );
 
-    try {
-      const processedChunks = [];
-
-      for (const chunk of doc.stepData.chunking) {
-        const response = await fetch('/api/my/rag/process', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input: chunk }),
-        });
-
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        const data = await response.json();
-        processedChunks.push(data);
-      }
-
-      setDocuments((prev) =>
-        prev.map((d) =>
-          d.id === docId
-            ? {
-                ...d,
-                completedSteps: [...d.completedSteps, "processing"],
-                currentStep: null,
-                status: "pending" as const,
-                stepData: { ...d.stepData, processing: processedChunks },
-              }
-            : d
-        )
-      );
-      toast.success(`Processed ${processedChunks.length} chunks`);
-    } catch (error) {
-      setDocuments((prev) =>
-        prev.map((d) => (d.id === docId ? { ...d, currentStep: null, status: "error" as const } : d))
-      );
-      toast.error(error instanceof Error ? error.message : "Failed to process chunks");
-    }
-  };
-
-  const executeStoring = async (docId: string) => {
-    const doc = documents.find((d) => d.id === docId);
-    if (!doc || !doc.stepData.processing) {
-      toast.error("No processed chunks available");
-      return;
-    }
-
-    setDocuments((prev) =>
-      prev.map((d) => (d.id === docId ? { ...d, currentStep: "storing" as const, status: "processing" as const } : d))
-    );
+    toast.info("Generating download URL...");
 
     try {
-      const response = await fetch('/api/my/rag/store', {
+      // Call download action to get signed URL
+      const response = await fetch('/api/my/rag/download', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ input: doc.stepData.processing }),
+        body: JSON.stringify({ s3_key: doc.stepData.chunkingS3Key }),
       });
 
       if (!response.ok) {
@@ -344,25 +295,31 @@ const Ingest = () => {
 
       const data = await response.json();
 
+      if (data.error) {
+        throw new Error(data.error);
+      }
+
+      const downloadUrl = data.download_url;
+
       setDocuments((prev) =>
         prev.map((d) =>
           d.id === docId
             ? {
                 ...d,
-                completedSteps: [...d.completedSteps, "storing"],
+                completedSteps: [...d.completedSteps, "export"],
                 currentStep: null,
                 status: "completed" as const,
-                stepData: { ...d.stepData, storing: data.output },
+                stepData: { ...d.stepData, export: downloadUrl },
               }
             : d
         )
       );
-      toast.success("Document stored successfully");
+      toast.success("Download URL generated");
     } catch (error) {
       setDocuments((prev) =>
         prev.map((d) => (d.id === docId ? { ...d, currentStep: null, status: "error" as const } : d))
       );
-      toast.error(error instanceof Error ? error.message : "Failed to store document");
+      toast.error(error instanceof Error ? error.message : "Failed to generate download URL");
     }
   };
 
@@ -384,29 +341,12 @@ const Ingest = () => {
     );
   };
 
+
   return (
     <div className="flex h-screen flex-col bg-background">
       {/* Header */}
       <header className="flex items-center justify-between border-b px-4 py-3">
-        <h1 className="text-xl font-semibold text-foreground">Document Ingestion</h1>
-        <Button variant="outline" size="sm" onClick={() => navigate("/")}>
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="mr-2"
-          >
-            <path d="m12 19-7-7 7-7" />
-            <path d="M19 12H5" />
-          </svg>
-          Back to Chat
-        </Button>
+        <h1 className="text-xl font-semibold text-foreground">TruChat - Document Ingestion</h1>
       </header>
 
       {/* Main Content */}
@@ -597,7 +537,7 @@ const Ingest = () => {
                               )}
                               {step === "chunking" && (
                                 <div>
-                                  <p className="text-sm text-muted-foreground mb-3">Split document into chunks with 100-token overlap.</p>
+                                  <p className="text-sm text-muted-foreground mb-3">Split document into chunks using empty lines as separators.</p>
                                   {!isCompleted && doc.completedSteps.includes("cleaning") && (
                                     <Button size="sm" onClick={() => executeChunking(doc.id)}>
                                       Chunk Document
@@ -605,72 +545,25 @@ const Ingest = () => {
                                   )}
                                   {isCompleted && doc.stepData.chunking && (
                                     <div className="space-y-3">
-                                      <p className="text-sm font-medium">
-                                        {doc.stepData.chunking.length} chunks created (500 tokens each, 100-token overlap)
-                                      </p>
+                                      <div className="flex items-center justify-between">
+                                        <p className="text-sm font-medium">
+                                          {doc.stepData.chunking.length} chunks created
+                                        </p>
+                                      </div>
                                       <div className="max-h-96 overflow-y-auto space-y-4">
-                                        {doc.stepData.chunking.map((chunk, idx) => {
-                                          const tokens = chunk.split(' ');
-                                          const prevChunk = idx > 0 ? doc.stepData.chunking[idx - 1] : null;
-
-                                          // Calculate overlap for highlighting
-                                          let overlapStart = 0;
-                                          if (prevChunk) {
-                                            const prevTokens = prevChunk.split(' ');
-                                            const overlapTokens = Math.min(100, prevTokens.length);
-                                            const prevOverlap = prevTokens.slice(-overlapTokens).join(' ');
-                                            const currentStart = tokens.slice(0, overlapTokens).join(' ');
-                                            if (prevOverlap === currentStart) {
-                                              overlapStart = overlapTokens;
-                                            }
-                                          }
-
-                                          return (
-                                            <div key={idx} className="border-l-4 border-blue-500 bg-card rounded-r shadow-sm">
-                                              <div className="bg-blue-50 px-4 py-2 border-b">
-                                                <div className="flex items-center justify-between">
-                                                  <span className="font-semibold text-blue-900">Chunk {idx + 1}</span>
-                                                  <span className="text-xs text-blue-700">
-                                                    {tokens.length} tokens
-                                                    {overlapStart > 0 && ` • ${overlapStart} overlap`}
-                                                  </span>
-                                                </div>
-                                              </div>
-                                              <div className="p-4 text-sm">
-                                                {overlapStart > 0 && (
-                                                  <>
-                                                    <span className="bg-yellow-200 px-1 rounded">
-                                                      {tokens.slice(0, overlapStart).join(' ')}
-                                                    </span>
-                                                    <span> {tokens.slice(overlapStart).join(' ')}</span>
-                                                  </>
-                                                )}
-                                                {overlapStart === 0 && chunk}
+                                        {doc.stepData.chunking.map((chunk, idx) => (
+                                          <div key={idx} className="border-l-4 border-blue-500 bg-card rounded-r shadow-sm">
+                                            <div className="bg-blue-50 px-4 py-2 border-b">
+                                              <div className="flex items-center justify-between">
+                                                <span className="font-semibold text-blue-900">Chunk {idx + 1}</span>
+                                                <span className="text-xs text-blue-700">
+                                                  {chunk.split(' ').length} words
+                                                </span>
                                               </div>
                                             </div>
-                                          );
-                                        })}
-                                      </div>
-                                    </div>
-                                  )}
-                                </div>
-                              )}
-                              {step === "processing" && (
-                                <div>
-                                  <p className="text-sm text-muted-foreground mb-3">Process chunks for Q&A pairs.</p>
-                                  {!isCompleted && doc.completedSteps.includes("chunking") && (
-                                    <Button size="sm" onClick={() => executeProcessing(doc.id)}>
-                                      Process Chunks
-                                    </Button>
-                                  )}
-                                  {isCompleted && doc.stepData.processing && (
-                                    <div className="space-y-2">
-                                      <p className="text-sm font-medium">{doc.stepData.processing.length} chunks processed:</p>
-                                      <div className="max-h-64 overflow-y-auto space-y-2">
-                                        {doc.stepData.processing.map((item, idx) => (
-                                          <div key={idx} className="p-3 bg-muted rounded text-sm">
-                                            <p><span className="font-semibold">Q:</span> {item.user}</p>
-                                            <p className="mt-1"><span className="font-semibold">A:</span> {item.assistant}</p>
+                                            <div className="p-4 text-sm whitespace-pre-wrap">
+                                              {chunk}
+                                            </div>
                                           </div>
                                         ))}
                                       </div>
@@ -678,17 +571,42 @@ const Ingest = () => {
                                   )}
                                 </div>
                               )}
-                              {step === "storing" && (
+                              {step === "export" && (
                                 <div>
-                                  <p className="text-sm text-muted-foreground mb-3">Store processed data in vector database.</p>
-                                  {!isCompleted && doc.completedSteps.includes("processing") && (
-                                    <Button size="sm" onClick={() => executeStoring(doc.id)}>
-                                      Store Document
+                                  <p className="text-sm text-muted-foreground mb-3">Generate a signed URL to download the chunked JSONL file.</p>
+                                  {!isCompleted && doc.completedSteps.includes("chunking") && (
+                                    <Button size="sm" onClick={() => executeExport(doc.id)}>
+                                      Generate Download URL
                                     </Button>
                                   )}
-                                  {isCompleted && (
-                                    <div className="p-3 bg-green-50 rounded text-sm text-green-800">
-                                      ✓ Document successfully stored in vector database
+                                  {isCompleted && doc.stepData.export && (
+                                    <div className="space-y-3">
+                                      <div className="p-3 bg-green-50 rounded text-sm text-green-800">
+                                        ✓ Download URL generated
+                                      </div>
+                                      <a
+                                        href={doc.stepData.export}
+                                        download={`${doc.name.replace('.pdf', '')}_chunks.jsonl`}
+                                        className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"
+                                      >
+                                        <svg
+                                          xmlns="http://www.w3.org/2000/svg"
+                                          width="16"
+                                          height="16"
+                                          viewBox="0 0 24 24"
+                                          fill="none"
+                                          stroke="currentColor"
+                                          strokeWidth="2"
+                                          strokeLinecap="round"
+                                          strokeLinejoin="round"
+                                          className="mr-2"
+                                        >
+                                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                                          <polyline points="7 10 12 15 17 10" />
+                                          <line x1="12" y1="15" x2="12" y2="3" />
+                                        </svg>
+                                        Download JSONL
+                                      </a>
                                     </div>
                                   )}
                                 </div>

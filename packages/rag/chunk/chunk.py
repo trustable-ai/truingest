@@ -1,5 +1,5 @@
 """
-Chunk text using token-based chunking with overlap.
+Chunk text using empty lines as separators.
 Stores chunks in S3 and returns the list of chunks.
 """
 import os
@@ -8,7 +8,8 @@ import boto3
 
 def chunk(args):
     """
-    Split text into overlapping chunks based on tokens (words).
+    Split text into chunks using empty lines as separators.
+    Each paragraph (text between empty lines) becomes a chunk.
 
     Args:
         args: dict with 'input' (text to chunk) and optional S3 credentials
@@ -21,19 +22,22 @@ def chunk(args):
     if not input_text:
         return {"output": []}
 
-    # Chunking parameters from spec
-    chunk_size = 500  # tokens
-    overlap = 100     # tokens
-    step = chunk_size - overlap  # 400 tokens
-
-    # Tokenize: simple word-based tokenization
-    tokens = input_text.split()
-
+    # Split by empty lines (one or more consecutive newlines)
+    # This creates chunks separated by blank lines
     chunks = []
-    for i in range(0, len(tokens), step):
-        chunk_tokens = tokens[i:i + chunk_size]
-        chunk_text = ' '.join(chunk_tokens)
-        chunks.append(chunk_text)
+    current_chunk = []
+
+    for line in input_text.split('\n'):
+        if line.strip():  # Non-empty line
+            current_chunk.append(line)
+        else:  # Empty line - end current chunk
+            if current_chunk:
+                chunks.append('\n'.join(current_chunk))
+                current_chunk = []
+
+    # Add the last chunk if there's any content
+    if current_chunk:
+        chunks.append('\n'.join(current_chunk))
 
     # Store in S3 if credentials provided
     s3_key = None
@@ -49,7 +53,11 @@ def chunk(args):
 
 def store_chunks_in_s3(chunks, args):
     """
-    Store chunks in S3 as JSON.
+    Store chunks in S3 as JSONL with format {"assistant": <chunk>}.
+
+    According to spec 4-chunk.md:
+    - Save all chunks as a single JSONL file
+    - Each line in format: {"assistant": <chunk>}
 
     Args:
         chunks: list of text chunks
@@ -79,20 +87,20 @@ def store_chunks_in_s3(chunks, args):
         # Generate S3 key
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        s3_key = f"chunks/chunks_{timestamp}.json"
+        s3_key = f"chunks/chunks_{timestamp}.jsonl"
 
-        # Store chunks as JSON
-        chunks_data = {
-            "chunks": chunks,
-            "num_chunks": len(chunks),
-            "timestamp": timestamp
-        }
+        # Create JSONL content with format {"assistant": <chunk>}
+        jsonl_lines = []
+        for chunk in chunks:
+            jsonl_lines.append(json.dumps({"assistant": chunk}))
+
+        jsonl_content = '\n'.join(jsonl_lines)
 
         s3_client.put_object(
             Bucket=bucket,
             Key=s3_key,
-            Body=json.dumps(chunks_data, indent=2).encode('utf-8'),
-            ContentType='application/json'
+            Body=jsonl_content.encode('utf-8'),
+            ContentType='application/jsonl'
         )
 
         return s3_key

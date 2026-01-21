@@ -6,46 +6,72 @@ def test_chunk_empty():
     res = chunk_func({})
     assert res["output"] == []
 
-def test_chunk_small_text():
-    """Test chunking with text smaller than chunk size"""
-    text = "This is a short document with just a few words."
+def test_chunk_single_paragraph():
+    """Test chunking with single paragraph (no empty lines)"""
+    text = "This is a single paragraph with no empty lines."
     res = chunk_func({"input": text})
     assert res["num_chunks"] == 1
     assert len(res["output"]) == 1
     assert res["output"][0] == text
 
-def test_chunk_with_overlap():
-    """Test that chunks have proper overlap of 100 tokens"""
-    # Create text with 600 words
-    text = ' '.join([f'word{i}' for i in range(1, 601)])
+def test_chunk_multiple_paragraphs():
+    """Test chunking with multiple paragraphs separated by empty lines"""
+    text = """First paragraph here.
+
+Second paragraph here.
+
+Third paragraph here."""
     res = chunk_func({"input": text})
 
-    # Should create 2 chunks (0-500, 400-600)
-    assert res["num_chunks"] == 2
-    assert len(res["output"]) == 2
-
-    # Verify chunk sizes
-    chunk1_tokens = res["output"][0].split()
-    chunk2_tokens = res["output"][1].split()
-    assert len(chunk1_tokens) == 500
-    assert len(chunk2_tokens) == 200
-
-    # Verify overlap: last 100 of chunk1 should match first 100 of chunk2
-    overlap1 = chunk1_tokens[-100:]
-    overlap2 = chunk2_tokens[:100]
-    assert overlap1 == overlap2
-
-def test_chunk_parameters():
-    """Test that chunking uses correct parameters (500/100)"""
-    # Create text with exactly 900 words
-    text = ' '.join([f'w{i}' for i in range(900)])
-    res = chunk_func({"input": text})
-
-    # With chunk_size=500, overlap=100, step=400:
-    # Chunk 1: 0-500 (500 tokens)
-    # Chunk 2: 400-900 (500 tokens)
-    # Chunk 3: 800-900 (100 tokens)
+    # Should create 3 chunks (one per paragraph)
     assert res["num_chunks"] == 3
-    assert len(res["output"][0].split()) == 500
-    assert len(res["output"][1].split()) == 500
-    assert len(res["output"][2].split()) == 100
+    assert len(res["output"]) == 3
+    assert res["output"][0] == "First paragraph here."
+    assert res["output"][1] == "Second paragraph here."
+    assert res["output"][2] == "Third paragraph here."
+
+def test_chunk_multiline_paragraphs():
+    """Test chunking with multi-line paragraphs"""
+    text = """First line of paragraph 1.
+Second line of paragraph 1.
+
+First line of paragraph 2.
+Second line of paragraph 2.
+
+Paragraph 3."""
+    res = chunk_func({"input": text})
+
+    # Should create 3 chunks
+    assert res["num_chunks"] == 3
+    assert len(res["output"]) == 3
+    assert res["output"][0] == "First line of paragraph 1.\nSecond line of paragraph 1."
+    assert res["output"][1] == "First line of paragraph 2.\nSecond line of paragraph 2."
+    assert res["output"][2] == "Paragraph 3."
+
+def test_chunk_multiple_empty_lines():
+    """Test that multiple consecutive empty lines are treated as one separator"""
+    text = """Paragraph 1.
+
+
+Paragraph 2.
+
+
+
+Paragraph 3."""
+    res = chunk_func({"input": text})
+
+    # Should create 3 chunks regardless of multiple empty lines
+    assert res["num_chunks"] == 3
+    assert res["output"][0] == "Paragraph 1."
+    assert res["output"][1] == "Paragraph 2."
+    assert res["output"][2] == "Paragraph 3."
+
+def test_chunk_no_trailing_empty_line():
+    """Test that text without trailing empty line is handled correctly"""
+    text = """Para 1.
+
+Para 2."""
+    res = chunk_func({"input": text})
+    assert res["num_chunks"] == 2
+    assert res["output"][0] == "Para 1."
+    assert res["output"][1] == "Para 2."

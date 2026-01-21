@@ -1,9 +1,11 @@
-Implement function clean that remove line like:
+Implement function clean that 
 
-6 
+- remove lines with a single number in it (they are page number) and remove all the empty spaces before and after it joining pages
 
+- remove lines with Figure <number>
 
-and charter strange not in the language selected like ââ
+- remove the table of content: all the lines ending in ...<number> 
 
-There is a problem of encoding because â is introduced when in the original file there was a unordered list
+- the ouutput should be utf-8
 
+- keep at least one line separating paragraphs
