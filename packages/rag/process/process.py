@@ -29,7 +29,7 @@ def process(args):
         return {"error": "input is required", "output": ""}
 
     # Get OpenAI configuration
-    api_key = args.get("OPENAI_API_TOKEN", os.getenv("OPENAI_API_TOKEN", "dummy"))
+    api_key = args.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "dummy"))
     base_url = args.get("OPENAI_BASE_URL", os.getenv("OPENAI_BASE_URL"))
     model = args.get("OPENAI_MODEL", os.getenv("OPENAI_MODEL", "gpt-3.5-turbo"))
 
@@ -94,4 +94,3 @@ Text:
 
     except Exception as e:
         return {"error": f"Failed to process chunk: {str(e)}", "output": ""}
-   
