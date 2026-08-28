@@ -51,8 +51,8 @@ def ingest(args):
             ContentType='application/pdf'
         )
 
-        # Call Tika service in Kubernetes (tika.tika namespace)
-        tika_url = "http://tika.tika:9998/tika"
+        # Call Tika service in Kubernetes (tika in current namespace)
+        tika_url = "http://tika:9998/tika"
         tika_response = requests.put(
             tika_url,
             data=pdf_content,
