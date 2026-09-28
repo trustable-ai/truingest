@@ -21,14 +21,16 @@ def ingest(args):
     secret_key = args.get("S3_SECRET_KEY", os.getenv("S3_SECRET_KEY"))
     bucket = args.get("S3_BUCKET_DATA", os.getenv("S3_BUCKET_DATA"))
 
-    # Get filename and file content from input
+    # Get filename and file content from input.
+    # `parts` (list of S3 keys) is used when the browser chunked the file
+    # across multiple <1 MB uploads (rag/upload). `fileContent` is the legacy
+    # small-file inline base64 path. A bare `filename` reads a single S3 key.
     filename = args.get("filename")
     file_content_b64 = args.get("fileContent")
+    parts = args.get("parts")
 
-    if not filename:
+    if not filename and not parts:
         return {"error": "filename parameter is required"}
-    if not file_content_b64:
-        return {"error": "fileContent parameter is required"}
 
     # Initialize S3 client
     s3_client = boto3.client(
@@ -40,16 +42,40 @@ def ingest(args):
     )
 
     try:
-        # Decode base64 file content
-        pdf_content = base64.b64decode(file_content_b64)
-
-        # Upload PDF to S3
-        s3_client.put_object(
-            Bucket=bucket,
-            Key=filename,
-            Body=pdf_content,
-            ContentType='application/pdf'
-        )
+        if file_content_b64:
+            # Legacy small-file path: PDF sent inline as base64 in the request body.
+            pdf_content = base64.b64decode(file_content_b64)
+            # Upload PDF to S3 so it is stored alongside the extracted text
+            s3_client.put_object(
+                Bucket=bucket,
+                Key=filename,
+                Body=pdf_content,
+                ContentType='application/pdf'
+            )
+        elif isinstance(parts, list) and parts:
+            # Chunked upload path: the browser uploaded each chunk as its own
+            # S3 object via rag/upload. Read and concatenate them in order.
+            pieces = []
+            for key in parts:
+                obj = s3_client.get_object(Bucket=bucket, Key=key)
+                pieces.append(obj['Body'].read())
+            pdf_content = b"".join(pieces)
+            if not pdf_content:
+                return {"error": "uploaded file is empty"}
+            # Persist the reassembled PDF so it lives alongside the extracted text.
+            if filename:
+                s3_client.put_object(
+                    Bucket=bucket,
+                    Key=filename,
+                    Body=pdf_content,
+                    ContentType='application/pdf'
+                )
+        else:
+            # Single-key read: the browser uploaded the whole PDF to S3 already.
+            obj = s3_client.get_object(Bucket=bucket, Key=filename)
+            pdf_content = obj['Body'].read()
+            if not pdf_content:
+                return {"error": "uploaded file is empty"}
 
         # Call Tika service in Kubernetes (tika in current namespace)
         tika_url = "http://tika:9998/tika"
@@ -66,7 +92,13 @@ def ingest(args):
         extracted_text = tika_response.text
 
         # Store extracted text back to S3
-        output_filename = filename.replace('.pdf', '_extracted.txt')
+        base_name = (filename or (parts[0] if parts else "output"))
+        # Strip a trailing .partN chunk suffix so the output name is clean.
+        import re
+        base_name = re.sub(r'\.part\d+$', '', base_name)
+        output_filename = base_name.replace('.pdf', '_extracted.txt')
+        if output_filename == base_name:
+            output_filename = base_name + '_extracted.txt'
         s3_client.put_object(
             Bucket=bucket,
             Key=output_filename,

@@ -40,7 +40,7 @@ Line 3"""
     assert lines[4] == "Line 3"
 
 def test_clean_normalizes_quotes():
-    text = "He said "hello" and 'goodbye'"
+    text = 'He said "hello" and \'goodbye\''
     res = clean.clean({"input": text})
     assert '"' in res["output"]
     assert "'" in res["output"]

@@ -91,6 +91,19 @@ const Ingest = () => {
     toast.success("File ready for extraction");
   };
 
+  // Read a Blob chunk as base64 (without the data: URI prefix).
+  const readChunkAsBase64 = (blob: Blob): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const result = e.target?.result as string;
+        const comma = result.indexOf(',');
+        resolve(comma >= 0 ? result.slice(comma + 1) : result);
+      };
+      reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+      reader.readAsDataURL(blob);
+    });
+
   const executeExtract = async (docId: string) => {
     const doc = documents.find((d) => d.id === docId);
     if (!doc || !doc.file) {
@@ -102,74 +115,67 @@ const Ingest = () => {
       prev.map((d) => (d.id === docId ? { ...d, currentStep: "extract" as const, status: "processing" as const } : d))
     );
 
-    try {
-      // Upload file as base64 to backend along with ingest request
-      const reader = new FileReader();
-
-      reader.onload = async (e) => {
-        try {
-          const base64Data = e.target?.result as string;
-          const base64Content = base64Data.split(',')[1]; // Remove data:application/pdf;base64, prefix
-
-          const filename = `uploads/${Date.now()}_${doc.file!.name}`;
-
-          // Call rag/ingest endpoint which will handle S3 upload and Tika extraction
-          const response = await fetch('/api/my/rag/ingest', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              filename: filename,
-              fileContent: base64Content
-            }),
-          });
-
-          if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-          }
-
-          const data = await response.json();
-
-          if (data.error) {
-            throw new Error(data.error);
-          }
-
-          const extractedText = data.output;
-
-          setDocuments((prev) =>
-            prev.map((d) =>
-              d.id === docId
-                ? {
-                    ...d,
-                    completedSteps: [...d.completedSteps, "extract"],
-                    currentStep: null,
-                    status: "pending" as const,
-                    stepData: { ...d.stepData, extract: extractedText },
-                  }
-                : d
-            )
-          );
-          toast.success("Text extracted successfully");
-        } catch (error) {
-          setDocuments((prev) =>
-            prev.map((d) => (d.id === docId ? { ...d, currentStep: null, status: "error" as const } : d))
-          );
-          toast.error(error instanceof Error ? error.message : "Failed to extract text");
-        }
-      };
-
-      reader.onerror = () => {
-        setDocuments((prev) =>
-          prev.map((d) => (d.id === docId ? { ...d, currentStep: null, status: "error" as const } : d))
-        );
-        toast.error("Failed to read file");
-      };
-
-      reader.readAsDataURL(doc.file);
-    } catch (error) {
+    const fail = (message: string) => {
       setDocuments((prev) =>
         prev.map((d) => (d.id === docId ? { ...d, currentStep: null, status: "error" as const } : d))
       );
-      toast.error(error instanceof Error ? error.message : "Failed to extract text");
+      toast.error(message);
+    };
+
+    try {
+      const file = doc.file;
+      const baseKey = `uploads/${Date.now()}_${file.name}`;
+
+      // 1. Upload the file in small chunks, each as its own S3 object.
+      // 700 KB raw -> ~933 KB base64 + JSON wrapper, safely under the ~1 MB
+      // request-body limit. (S3 multipart is unusable here because SeaweedFS
+      // requires a 5 MB minimum per part, larger than the request limit.)
+      const CHUNK_SIZE = 700 * 1024;
+      const partKeys: string[] = [];
+      let partNumber = 1;
+      for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
+        const blob = file.slice(offset, offset + CHUNK_SIZE);
+        const partB64 = await readChunkAsBase64(blob);
+        const partKey = `${baseKey}.part${partNumber}`;
+        const upRes = await fetch('/api/my/rag/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: partKey, part: partB64 }),
+        });
+        if (!upRes.ok) throw new Error(`Upload chunk ${partNumber} failed: ${upRes.status}`);
+        const upData = await upRes.json();
+        if (upData.error) throw new Error(upData.error);
+        partKeys.push(partKey);
+        partNumber += 1;
+      }
+
+      // 2. Extract text: rag/ingest reads & concatenates the chunk objects from S3.
+      const response = await fetch('/api/my/rag/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: baseKey, parts: partKeys }),
+      });
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const data = await response.json();
+      if (data.error) throw new Error(data.error);
+
+      const extractedText = data.output;
+      setDocuments((prev) =>
+        prev.map((d) =>
+          d.id === docId
+            ? {
+                ...d,
+                completedSteps: [...d.completedSteps, "extract"],
+                currentStep: null,
+                status: "pending" as const,
+                stepData: { ...d.stepData, extract: extractedText },
+              }
+            : d
+        )
+      );
+      toast.success("Text extracted successfully");
+    } catch (error) {
+      fail(error instanceof Error ? error.message : "Failed to extract text");
     }
   };
 
@@ -282,8 +288,8 @@ const Ingest = () => {
     toast.info("Generating download URL...");
 
     try {
-      // Call download action to get signed URL
-      const response = await fetch('/api/my/rag/download', {
+      // Call geturl action to get a download URL for the chunked JSONL in S3
+      const response = await fetch('/api/my/rag/geturl', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ s3_key: doc.stepData.chunkingS3Key }),
