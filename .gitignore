@@ -46,3 +46,17 @@ CLAUDE.md.removed
 .claude.removed
 .openserverless-contract.md
 # >>> end trustable managed <<<
+
+# >>> trustant managed — do not edit <<<
+.acp-data/
+.env
+.env.production
+!.env.dist
+node_modules/
+.mcp.json
+CLAUDE.md
+CLAUDE.md.removed
+.claude
+.claude.removed
+.openserverless-contract.md
+# >>> end trustant managed <<<
